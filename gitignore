@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+venv/
+env/
+.venv/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+.streamlit/secrets.toml
+
+# Output files
+*.xlsx
+*.csv
+output/
+temp/
+uploads/
+
+# OS
+.DS_Store
+Thumbs.db
