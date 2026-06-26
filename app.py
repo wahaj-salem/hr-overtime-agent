@@ -1,6 +1,8 @@
 """
-HR Overtime Automation Agent v3.0
-يدعم: PDF + الصور + استخراج التقييم
+HR Overtime Automation Agent v4.0
+- يدعم PDF + صور
+- ضغط تلقائي للصور الكبيرة
+- إصلاح SyntaxWarning
 """
 
 import streamlit as st
@@ -12,7 +14,8 @@ import pandas as pd
 from datetime import datetime
 from io import BytesIO
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
-import fitz  # PyMuPDF
+from PIL import Image
+import fitz
 
 # ============================================================================
 # Page Config
@@ -24,10 +27,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-# ============================================================================
-# CSS
-# ============================================================================
 
 st.markdown("""
 <style>
@@ -63,10 +62,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ============================================================================
-# Header
-# ============================================================================
-
 st.markdown("""
 <div class="main-header">
     <h1>🤖 HR Overtime Automation Agent</h1>
@@ -74,7 +69,7 @@ st.markdown("""
         نظام ذكي لاستخراج بيانات الساعات الإضافية والتقييمات
     </p>
     <p style="margin: 0; opacity: 0.9;">
-        🆕 يدعم PDF والصور
+        🆕 يدعم PDF والصور + ضغط تلقائي
     </p>
 </div>
 """, unsafe_allow_html=True)
@@ -131,30 +126,88 @@ with st.sidebar:
         """)
     
     st.markdown("---")
-    st.markdown("**v3.0** | © 2026")
+    st.markdown("## 🎨 إعدادات الصور")
+    
+    image_quality = st.slider(
+        "جودة الصورة المرسلة",
+        min_value=50,
+        max_value=95,
+        value=80,
+        help="جودة أعلى = دقة أفضل لكن أبطأ"
+    )
+    
+    max_dimension = st.slider(
+        "الحد الأقصى لحجم الصورة (px)",
+        min_value=1000,
+        max_value=3000,
+        value=2000,
+        step=500
+    )
+    
+    st.markdown("---")
+    st.markdown("**v4.0** | © 2026")
 
 # ============================================================================
 # Helper Functions
 # ============================================================================
 
-def pdf_to_images(pdf_bytes):
-    """تحويل PDF إلى قائمة صور"""
+def compress_image(image_bytes, max_dimension=2000, quality=80):
+    """ضغط الصورة لتقليل الحجم"""
+    
+    try:
+        # فتح الصورة
+        img = Image.open(BytesIO(image_bytes))
+        
+        # تحويل إلى RGB إذا لزم الأمر
+        if img.mode in ('RGBA', 'P'):
+            img = img.convert('RGB')
+        
+        # تغيير الحجم إذا كانت كبيرة
+        width, height = img.size
+        max_side = max(width, height)
+        
+        if max_side > max_dimension:
+            ratio = max_dimension / max_side
+            new_width = int(width * ratio)
+            new_height = int(height * ratio)
+            img = img.resize((new_width, new_height), Image.LANCZOS)
+        
+        # حفظ بجودة معقولة
+        output = BytesIO()
+        img.save(output, format='JPEG', quality=quality, optimize=True)
+        output.seek(0)
+        
+        return output.getvalue()
+        
+    except Exception as e:
+        st.warning(f"⚠️ فشل ضغط الصورة: {str(e)}")
+        return image_bytes
+
+def pdf_to_images(pdf_bytes, max_dimension=2000):
+    """تحويل PDF إلى قائمة صور مضغوطة"""
     
     images = []
     
     try:
-        # فتح PDF من bytes
         pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
         
         for page_num in range(len(pdf_document)):
             page = pdf_document[page_num]
             
-            # تحويل لصورة بدقة عالية (300 DPI)
-            mat = fitz.Matrix(2.0, 2.0)  # zoom factor
+            # حساب zoom factor بناءً على حجم الصفحة
+            page_width = page.rect.width
+            page_height = page.rect.height
+            max_side = max(page_width, page_height)
+            
+            # zoom factor لتحقيق max_dimension
+            zoom = min(2.0, max_dimension / max_side) if max_side > 0 else 1.5
+            zoom = max(1.0, zoom)
+            
+            mat = fitz.Matrix(zoom, zoom)
             pix = page.get_pixmap(matrix=mat)
             
-            # تحويل لـ bytes
             img_bytes = pix.tobytes("png")
+            
             images.append({
                 'bytes': img_bytes,
                 'name': f"page_{page_num + 1}.png",
@@ -193,19 +246,30 @@ def convert_rating(rating_value, auto_convert=True):
     except (ValueError, TypeError):
         return rating_value
 
-def extract_data_from_image(client, image_bytes, filename, unclear_text, extract_rating=True):
-    """استخراج البيانات من صورة باستخدام Claude"""
+def extract_data_from_image(client, image_bytes, filename, unclear_text, extract_rating=True, max_dim=2000, quality=80):
+    """استخراج البيانات مع ضغط تلقائي"""
     
-    image_data = encode_image(image_bytes)
+    # ضغط الصورة أولاً
+    compressed_bytes = compress_image(image_bytes, max_dim, quality)
+    
+    # التحقق من الحجم
+    size_mb = len(compressed_bytes) / (1024 * 1024)
+    if size_mb > 4.5:
+        # ضغط أقوى
+        compressed_bytes = compress_image(image_bytes, 1500, 70)
+        size_mb = len(compressed_bytes) / (1024 * 1024)
+        
+        if size_mb > 4.5:
+            compressed_bytes = compress_image(image_bytes, 1000, 60)
+    
+    image_data = encode_image(compressed_bytes)
     
     rating_instruction = ""
     rating_json_field = ""
     
     if extract_rating:
         rating_instruction = """
-4. RATING (تقييم الموظف) - رقم من 1 إلى 100
-   - قد يكون رقم واحد (5, 8) أو رقم كامل (50, 80)
-   - استخرج القيمة كما هي"""
+4. RATING (تقييم الموظف) - رقم من 1 إلى 100"""
         rating_json_field = ',\n      "rating": "80"'
     
     prompt = f"""أنت خبير في قراءة جداول الساعات الإضافية.
@@ -249,7 +313,7 @@ def extract_data_from_image(client, image_bytes, filename, unclear_text, extract
                             "type": "image",
                             "source": {
                                 "type": "base64",
-                                "media_type": "image/png",
+                                "media_type": "image/jpeg",
                                 "data": image_data
                             }
                         },
@@ -266,7 +330,7 @@ def extract_data_from_image(client, image_bytes, filename, unclear_text, extract
         return None
         
     except Exception as e:
-        st.error(f"خطأ في {filename}: {str(e)}")
+        st.error(f"❌ خطأ في {filename}: {str(e)}")
         return None
 
 def merge_all_data(all_data, extract_rating=True, auto_convert=True):
@@ -314,7 +378,10 @@ def merge_all_data(all_data, extract_rating=True, auto_convert=True):
     return all_employees, sorted(all_dates, key=lambda x: int(x.split('/')[0])), month_info
 
 def create_dataframe(employees, sorted_dates, sort_order, extract_rating=True):
-    """إنشاء DataFrame"""
+    """إنشاء DataFrame مع معالجة الأخطاء"""
+    
+    if not employees:
+        return pd.DataFrame()
     
     rows = []
     for emp_id, emp_data in employees.items():
@@ -333,8 +400,12 @@ def create_dataframe(employees, sorted_dates, sort_order, extract_rating=True):
     
     df = pd.DataFrame(rows)
     
+    if 'ID' not in df.columns:
+        return df
+    
+    # الترتيب باستخدام raw string
     if "الأصغر للأكبر" in sort_order:
-        df['ID_sort'] = df['ID'].astype(str).str.extract('(\d+)').astype(float)
+        df['ID_sort'] = df['ID'].astype(str).str.extract(r'(\d+)').astype(float)
         df = df.sort_values('ID_sort').drop('ID_sort', axis=1).reset_index(drop=True)
     elif "حسب الاسم" in sort_order:
         df = df.sort_values('NAME').reset_index(drop=True)
@@ -410,11 +481,12 @@ def create_excel_file(df, month_info):
 
 tab1, tab2, tab3 = st.tabs(["📤 رفع ومعالجة", "📊 النتائج", "ℹ️ التعليمات"])
 
-# Tab 1: Upload
+# Tab 1
 with tab1:
     st.markdown("### 📤 رفع الملفات")
     
     st.info("📎 **يمكنك رفع:** PDF (متعدد الصفحات) + صور (PNG, JPG)")
+    st.success("✨ **جديد v4.0:** ضغط تلقائي للصور الكبيرة من CamScanner")
     
     uploaded_files = st.file_uploader(
         "اسحب الملفات هنا أو اضغط للاختيار",
@@ -423,7 +495,6 @@ with tab1:
     )
     
     if uploaded_files:
-        # تصنيف الملفات
         pdf_count = sum(1 for f in uploaded_files if f.name.lower().endswith('.pdf'))
         img_count = len(uploaded_files) - pdf_count
         
@@ -446,7 +517,6 @@ with tab1:
                 try:
                     client = anthropic.Anthropic(api_key=api_key)
                     
-                    # تجهيز كل الصور (من PDF والصور)
                     all_images_to_process = []
                     
                     status_text = st.empty()
@@ -456,9 +526,8 @@ with tab1:
                         file_bytes = file.getvalue()
                         
                         if file.name.lower().endswith('.pdf'):
-                            # تحويل PDF لصور
                             status_text.text(f"📄 تحويل PDF: {file.name}")
-                            pdf_images = pdf_to_images(file_bytes)
+                            pdf_images = pdf_to_images(file_bytes, max_dimension)
                             
                             for pdf_img in pdf_images:
                                 all_images_to_process.append({
@@ -468,7 +537,6 @@ with tab1:
                             
                             st.success(f"✅ {file.name}: {len(pdf_images)} صفحة")
                         else:
-                            # صورة عادية
                             all_images_to_process.append({
                                 'bytes': file_bytes,
                                 'name': file.name
@@ -478,35 +546,52 @@ with tab1:
                         st.error("❌ لا توجد ملفات للمعالجة!")
                         st.stop()
                     
-                    st.info(f"📊 إجمالي الصفحات للمعالجة: **{len(all_images_to_process)}**")
+                    st.info(f"📊 إجمالي الصفحات: **{len(all_images_to_process)}**")
                     
-                    # معالجة الصور
                     progress_bar = st.progress(0)
                     all_data = []
+                    successful = 0
+                    failed = 0
                     
                     for idx, img_info in enumerate(all_images_to_process):
                         status_text.text(f"⏳ معالجة {idx+1}/{len(all_images_to_process)}: {img_info['name']}")
                         
                         data = extract_data_from_image(
                             client, img_info['bytes'], img_info['name'],
-                            unclear_text, extract_rating
+                            unclear_text, extract_rating,
+                            max_dimension, image_quality
                         )
                         
                         if data:
                             all_data.append(data)
+                            successful += 1
+                        else:
+                            failed += 1
                         
                         progress_bar.progress((idx + 1) / len(all_images_to_process))
                     
                     status_text.text("✅ تمت المعالجة!")
                     
+                    if successful == 0:
+                        st.error(f"❌ فشلت كل الصور ({failed} صفحة)")
+                        st.info("💡 جرب: تقليل جودة الصورة من الإعدادات")
+                        st.stop()
+                    
+                    st.info(f"📊 نجحت: {successful} | فشلت: {failed}")
+                    
                     # دمج البيانات
                     employees, sorted_dates, month_info = merge_all_data(
                         all_data, extract_rating, auto_convert_rating
                     )
+                    
+                    if not employees:
+                        st.warning("⚠️ لم يتم استخراج أي موظفين من الصور")
+                        st.stop()
+                    
                     df = create_dataframe(employees, sorted_dates, sort_order, extract_rating)
                     
                     st.session_state['df'] = df
-                    st.session_state['month_info'] = month_info
+                    st.session_state['month_info'] = month_info or {'month': '00', 'year': '0000'}
                     st.session_state['employees_count'] = len(employees)
                     st.session_state['dates_count'] = len(sorted_dates)
                     st.session_state['extract_rating'] = extract_rating
@@ -514,7 +599,7 @@ with tab1:
                     st.markdown(f"""
                     <div class="success-box">
                         <h3>✅ تمت المعالجة بنجاح!</h3>
-                        <p>تم استخراج بيانات <strong>{len(employees)}</strong> موظف من <strong>{len(all_images_to_process)}</strong> صفحة</p>
+                        <p>تم استخراج بيانات <strong>{len(employees)}</strong> موظف</p>
                         <p>اذهب إلى تبويب <strong>📊 النتائج</strong></p>
                     </div>
                     """, unsafe_allow_html=True)
@@ -522,15 +607,15 @@ with tab1:
                     st.balloons()
                     
                 except Exception as e:
-                    st.error(f"❌ خطأ: {str(e)}")
+                    st.error(f"❌ خطأ عام: {str(e)}")
         else:
             st.warning("⚠️ يرجى إدخال مفتاح API")
 
-# Tab 2: Results
+# Tab 2
 with tab2:
     st.markdown("### 📊 النتائج")
     
-    if 'df' in st.session_state:
+    if 'df' in st.session_state and not st.session_state['df'].empty:
         df = st.session_state['df']
         month_info = st.session_state['month_info']
         has_rating = st.session_state.get('extract_rating', False)
@@ -585,9 +670,6 @@ with tab2:
         st.markdown("---")
         st.markdown("#### 📋 جدول البيانات")
         
-        if has_rating:
-            st.info("💡 عمود التقييم: القيم محولة تلقائياً (5 → 50)")
-        
         edited_df = st.data_editor(
             df,
             use_container_width=True,
@@ -629,7 +711,7 @@ with tab2:
     else:
         st.info("ℹ️ لا توجد بيانات. ارفع الملفات أولاً")
 
-# Tab 3: Instructions
+# Tab 3
 with tab3:
     st.markdown("### 📖 كيفية الاستخدام")
     
@@ -642,15 +724,11 @@ with tab3:
     **2️⃣ ضع المفتاح في الشريط الجانبي**
     
     **3️⃣ ارفع الملفات:**
-    - 📄 **PDF**: يدعم عدة صفحات في ملف واحد
+    - 📄 **PDF**: متعدد الصفحات
     - 🖼️ **صور**: PNG, JPG, JPEG, WEBP
-    - يمكن خلط PDF والصور في نفس الرفع
+    - يمكن خلطهما
     
-    **4️⃣ اضبط الإعدادات:**
-    - ترتيب الموظفين
-    - معالجة الخلايا غير الواضحة
-    - تفعيل التقييم
-    - التحويل التلقائي (5 → 50)
+    **4️⃣ اضبط الإعدادات**
     
     **5️⃣ اضغط "بدء المعالجة"**
     
@@ -658,25 +736,25 @@ with tab3:
     
     ---
     
-    #### 🆕 ميزة PDF:
+    #### 🆕 v4.0 الجديد:
     
-    - رفع ملف PDF واحد بدل عشر صور
-    - التطبيق يقرأ كل الصفحات تلقائياً
-    - **أسهل بكثير من رفع صور منفصلة!**
+    - ✅ **ضغط تلقائي** للصور الكبيرة من CamScanner
+    - ✅ **معالجة الأخطاء** المحسنة
+    - ✅ **عرض إحصائيات** النجاح والفشل
+    - ✅ **تحكم في الجودة** من الإعدادات
     
     ---
     
-    #### 🆕 ميزة التقييم:
+    #### 💡 نصائح:
     
-    **القاعدة:**
-    - `5` → `50`
-    - `8` → `80`  
-    - `50` → `50`
-    - `100` → `100`
+    - **CamScanner**: التطبيق يضغط الصور تلقائياً
+    - **الجودة**: 80% كافية في معظم الحالات
+    - **حجم الصورة**: 2000 px مثالي
+    - **PDF**: أسرع من رفع صور منفصلة
     """)
 
 st.markdown("---")
 st.markdown(
-    "<div style='text-align: center; color: #666;'>Built with ❤️ using Streamlit + Claude AI | v3.0</div>",
+    "<div style='text-align: center; color: #666;'>Built with ❤️ using Streamlit + Claude AI | v4.0</div>",
     unsafe_allow_html=True
 )
