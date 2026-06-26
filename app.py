@@ -1,6 +1,6 @@
 """
-HR Overtime Automation Agent v2.0
-Built with Streamlit + Claude AI
+HR Overtime Automation Agent v3.0
+يدعم: PDF + الصور + استخراج التقييم
 """
 
 import streamlit as st
@@ -12,6 +12,7 @@ import pandas as pd
 from datetime import datetime
 from io import BytesIO
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+import fitz  # PyMuPDF
 
 # ============================================================================
 # Page Config
@@ -25,7 +26,7 @@ st.set_page_config(
 )
 
 # ============================================================================
-# Custom CSS
+# CSS
 # ============================================================================
 
 st.markdown("""
@@ -70,7 +71,10 @@ st.markdown("""
 <div class="main-header">
     <h1>🤖 HR Overtime Automation Agent</h1>
     <p style="font-size: 1.2rem; margin: 0;">
-        نظام ذكي لاستخراج بيانات الساعات الإضافية والتقييمات باستخدام Claude AI
+        نظام ذكي لاستخراج بيانات الساعات الإضافية والتقييمات
+    </p>
+    <p style="margin: 0; opacity: 0.9;">
+        🆕 يدعم PDF والصور
     </p>
 </div>
 """, unsafe_allow_html=True)
@@ -127,28 +131,48 @@ with st.sidebar:
         """)
     
     st.markdown("---")
-    st.markdown("**v2.0** | © 2026")
+    st.markdown("**v3.0** | © 2026")
 
 # ============================================================================
 # Helper Functions
 # ============================================================================
 
+def pdf_to_images(pdf_bytes):
+    """تحويل PDF إلى قائمة صور"""
+    
+    images = []
+    
+    try:
+        # فتح PDF من bytes
+        pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+        
+        for page_num in range(len(pdf_document)):
+            page = pdf_document[page_num]
+            
+            # تحويل لصورة بدقة عالية (300 DPI)
+            mat = fitz.Matrix(2.0, 2.0)  # zoom factor
+            pix = page.get_pixmap(matrix=mat)
+            
+            # تحويل لـ bytes
+            img_bytes = pix.tobytes("png")
+            images.append({
+                'bytes': img_bytes,
+                'name': f"page_{page_num + 1}.png",
+                'page_number': page_num + 1
+            })
+        
+        pdf_document.close()
+        return images
+        
+    except Exception as e:
+        st.error(f"خطأ في معالجة PDF: {str(e)}")
+        return []
+
 def encode_image(image_bytes):
     return base64.standard_b64encode(image_bytes).decode('utf-8')
 
-def get_media_type(filename):
-    ext = filename.lower().split('.')[-1]
-    types = {
-        'png': 'image/png',
-        'jpg': 'image/jpeg',
-        'jpeg': 'image/jpeg',
-        'webp': 'image/webp',
-        'gif': 'image/gif'
-    }
-    return types.get(ext, 'image/jpeg')
-
 def convert_rating(rating_value, auto_convert=True):
-    """تحويل التقييم: إذا كان رقم واحد (5, 8) → اضربه في 10"""
+    """تحويل التقييم: 5 → 50"""
     
     if not auto_convert:
         return rating_value
@@ -159,11 +183,9 @@ def convert_rating(rating_value, auto_convert=True):
     try:
         num_value = float(str(rating_value).strip())
         
-        # رقم من 1 إلى 9 → اضرب في 10
         if 1 <= num_value < 10:
             return str(int(num_value * 10))
         
-        # كما هو
         if num_value == int(num_value):
             return str(int(num_value))
         return str(num_value)
@@ -172,10 +194,9 @@ def convert_rating(rating_value, auto_convert=True):
         return rating_value
 
 def extract_data_from_image(client, image_bytes, filename, unclear_text, extract_rating=True):
-    """استخراج البيانات من الصورة"""
+    """استخراج البيانات من صورة باستخدام Claude"""
     
     image_data = encode_image(image_bytes)
-    media_type = get_media_type(filename)
     
     rating_instruction = ""
     rating_json_field = ""
@@ -183,22 +204,22 @@ def extract_data_from_image(client, image_bytes, filename, unclear_text, extract
     if extract_rating:
         rating_instruction = """
 4. RATING (تقييم الموظف) - رقم من 1 إلى 100
-   - قد يكون مكتوب كرقم واحد (5, 8) أو رقم كامل (50, 80)
-   - استخرج القيمة كما هي مكتوبة بالضبط"""
+   - قد يكون رقم واحد (5, 8) أو رقم كامل (50, 80)
+   - استخرج القيمة كما هي"""
         rating_json_field = ',\n      "rating": "80"'
     
-    prompt = f"""أنت خبير في قراءة جداول الساعات الإضافية للموظفين.
+    prompt = f"""أنت خبير في قراءة جداول الساعات الإضافية.
 
-اقرأ الصورة بعناية واستخرج البيانات التالية لكل موظف:
+اقرأ الصورة واستخرج البيانات لكل موظف:
 1. ID (كود الموظف)
-2. NAME (اسم الموظف كامل)
-3. الساعات لكل يوم (التاريخ يكون في رؤوس الأعمدة مثل 1/6, 2/6){rating_instruction}
+2. NAME (اسم الموظف)
+3. الساعات لكل يوم (تواريخ مثل 1/6, 2/6){rating_instruction}
 
-قواعد مهمة:
-- إذا كان هناك خط يد غير واضح تماماً، اكتب "{unclear_text}"
-- إذا كانت الخلية فارغة، اكتب ""
-- إذا كان فيها F أو حرف، اكتبه كما هو
-- لا تخمن! إذا لم تكن متأكد 100%، اكتب "{unclear_text}"
+قواعد:
+- إذا غير واضح، اكتب "{unclear_text}"
+- إذا فارغ، اكتب ""
+- إذا حرف (F, M)، اكتبه كما هو
+- لا تخمن! غير متأكد = "{unclear_text}"
 
 أرجع JSON فقط:
 {{
@@ -228,7 +249,7 @@ def extract_data_from_image(client, image_bytes, filename, unclear_text, extract
                             "type": "image",
                             "source": {
                                 "type": "base64",
-                                "media_type": media_type,
+                                "media_type": "image/png",
                                 "data": image_data
                             }
                         },
@@ -245,11 +266,11 @@ def extract_data_from_image(client, image_bytes, filename, unclear_text, extract
         return None
         
     except Exception as e:
-        st.error(f"خطأ في معالجة {filename}: {str(e)}")
+        st.error(f"خطأ في {filename}: {str(e)}")
         return None
 
 def merge_all_data(all_data, extract_rating=True, auto_convert=True):
-    """دمج البيانات من كل الصور"""
+    """دمج البيانات"""
     
     all_employees = {}
     all_dates = set()
@@ -321,7 +342,7 @@ def create_dataframe(employees, sorted_dates, sort_order, extract_rating=True):
     return df
 
 def create_excel_file(df, month_info):
-    """إنشاء ملف Excel منسق"""
+    """إنشاء Excel"""
     
     output = BytesIO()
     
@@ -343,7 +364,6 @@ def create_excel_file(df, month_info):
             bottom=Side(style='thin')
         )
         
-        # تنسيق رؤوس الأعمدة
         rating_col_idx = None
         for col_idx, cell in enumerate(worksheet[1], 1):
             cell.fill = header_fill
@@ -354,7 +374,6 @@ def create_excel_file(df, month_info):
             if cell.value == 'التقييم':
                 rating_col_idx = col_idx
         
-        # تنسيق الخلايا
         for row in worksheet.iter_rows(min_row=2):
             for cell in row:
                 cell.border = thin_border
@@ -369,7 +388,6 @@ def create_excel_file(df, month_info):
                         cell.fill = rating_fill
                         cell.font = Font(bold=True, color="1F4E78")
         
-        # عرض الأعمدة
         for col in worksheet.columns:
             max_length = 0
             column_letter = col[0].column_letter
@@ -394,22 +412,26 @@ tab1, tab2, tab3 = st.tabs(["📤 رفع ومعالجة", "📊 النتائج",
 
 # Tab 1: Upload
 with tab1:
-    st.markdown("### 📤 رفع الصور")
+    st.markdown("### 📤 رفع الملفات")
+    
+    st.info("📎 **يمكنك رفع:** PDF (متعدد الصفحات) + صور (PNG, JPG)")
     
     uploaded_files = st.file_uploader(
-        "اسحب الصور هنا أو اضغط للاختيار",
-        type=['png', 'jpg', 'jpeg', 'webp'],
+        "اسحب الملفات هنا أو اضغط للاختيار",
+        type=['pdf', 'png', 'jpg', 'jpeg', 'webp'],
         accept_multiple_files=True
     )
     
     if uploaded_files:
-        st.success(f"✅ تم رفع {len(uploaded_files)} صورة")
+        # تصنيف الملفات
+        pdf_count = sum(1 for f in uploaded_files if f.name.lower().endswith('.pdf'))
+        img_count = len(uploaded_files) - pdf_count
         
-        with st.expander("👀 معاينة الصور"):
-            cols = st.columns(min(3, len(uploaded_files)))
-            for idx, file in enumerate(uploaded_files):
-                with cols[idx % 3]:
-                    st.image(file, caption=file.name, use_container_width=True)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("📄 ملفات PDF", pdf_count)
+        with col2:
+            st.metric("🖼️ صور", img_count)
         
         if api_key:
             if st.button("🚀 بدء المعالجة", use_container_width=True):
@@ -424,27 +446,60 @@ with tab1:
                 try:
                     client = anthropic.Anthropic(api_key=api_key)
                     
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
+                    # تجهيز كل الصور (من PDF والصور)
+                    all_images_to_process = []
                     
+                    status_text = st.empty()
+                    status_text.text("📄 تحضير الملفات...")
+                    
+                    for file in uploaded_files:
+                        file_bytes = file.getvalue()
+                        
+                        if file.name.lower().endswith('.pdf'):
+                            # تحويل PDF لصور
+                            status_text.text(f"📄 تحويل PDF: {file.name}")
+                            pdf_images = pdf_to_images(file_bytes)
+                            
+                            for pdf_img in pdf_images:
+                                all_images_to_process.append({
+                                    'bytes': pdf_img['bytes'],
+                                    'name': f"{file.name} - {pdf_img['name']}"
+                                })
+                            
+                            st.success(f"✅ {file.name}: {len(pdf_images)} صفحة")
+                        else:
+                            # صورة عادية
+                            all_images_to_process.append({
+                                'bytes': file_bytes,
+                                'name': file.name
+                            })
+                    
+                    if not all_images_to_process:
+                        st.error("❌ لا توجد ملفات للمعالجة!")
+                        st.stop()
+                    
+                    st.info(f"📊 إجمالي الصفحات للمعالجة: **{len(all_images_to_process)}**")
+                    
+                    # معالجة الصور
+                    progress_bar = st.progress(0)
                     all_data = []
                     
-                    for idx, file in enumerate(uploaded_files):
-                        status_text.text(f"⏳ معالجة {idx+1}/{len(uploaded_files)}: {file.name}")
+                    for idx, img_info in enumerate(all_images_to_process):
+                        status_text.text(f"⏳ معالجة {idx+1}/{len(all_images_to_process)}: {img_info['name']}")
                         
-                        file_bytes = file.getvalue()
                         data = extract_data_from_image(
-                            client, file_bytes, file.name,
+                            client, img_info['bytes'], img_info['name'],
                             unclear_text, extract_rating
                         )
                         
                         if data:
                             all_data.append(data)
                         
-                        progress_bar.progress((idx + 1) / len(uploaded_files))
+                        progress_bar.progress((idx + 1) / len(all_images_to_process))
                     
                     status_text.text("✅ تمت المعالجة!")
                     
+                    # دمج البيانات
                     employees, sorted_dates, month_info = merge_all_data(
                         all_data, extract_rating, auto_convert_rating
                     )
@@ -456,9 +511,10 @@ with tab1:
                     st.session_state['dates_count'] = len(sorted_dates)
                     st.session_state['extract_rating'] = extract_rating
                     
-                    st.markdown("""
+                    st.markdown(f"""
                     <div class="success-box">
                         <h3>✅ تمت المعالجة بنجاح!</h3>
+                        <p>تم استخراج بيانات <strong>{len(employees)}</strong> موظف من <strong>{len(all_images_to_process)}</strong> صفحة</p>
                         <p>اذهب إلى تبويب <strong>📊 النتائج</strong></p>
                     </div>
                     """, unsafe_allow_html=True)
@@ -571,7 +627,7 @@ with tab2:
                 use_container_width=True
             )
     else:
-        st.info("ℹ️ لا توجد بيانات. ارفع الصور أولاً")
+        st.info("ℹ️ لا توجد بيانات. ارفع الملفات أولاً")
 
 # Tab 3: Instructions
 with tab3:
@@ -585,17 +641,28 @@ with tab3:
     
     **2️⃣ ضع المفتاح في الشريط الجانبي**
     
-    **3️⃣ ارفع الصور**
+    **3️⃣ ارفع الملفات:**
+    - 📄 **PDF**: يدعم عدة صفحات في ملف واحد
+    - 🖼️ **صور**: PNG, JPG, JPEG, WEBP
+    - يمكن خلط PDF والصور في نفس الرفع
     
     **4️⃣ اضبط الإعدادات:**
     - ترتيب الموظفين
     - معالجة الخلايا غير الواضحة
-    - 🆕 تفعيل التقييم
-    - 🆕 التحويل التلقائي (5 → 50)
+    - تفعيل التقييم
+    - التحويل التلقائي (5 → 50)
     
     **5️⃣ اضغط "بدء المعالجة"**
     
     **6️⃣ حمل Excel أو CSV**
+    
+    ---
+    
+    #### 🆕 ميزة PDF:
+    
+    - رفع ملف PDF واحد بدل عشر صور
+    - التطبيق يقرأ كل الصفحات تلقائياً
+    - **أسهل بكثير من رفع صور منفصلة!**
     
     ---
     
@@ -606,12 +673,10 @@ with tab3:
     - `8` → `80`  
     - `50` → `50`
     - `100` → `100`
-    
-    يمكن تعطيل التحويل من الإعدادات
     """)
 
 st.markdown("---")
 st.markdown(
-    "<div style='text-align: center; color: #666;'>Built with ❤️ using Streamlit + Claude AI | v2.0</div>",
+    "<div style='text-align: center; color: #666;'>Built with ❤️ using Streamlit + Claude AI | v3.0</div>",
     unsafe_allow_html=True
 )
